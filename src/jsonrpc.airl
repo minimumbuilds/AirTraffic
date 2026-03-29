@@ -1,0 +1,2 @@
+;; jsonrpc.airl — JSON-RPC 2.0 message parsing and serialization
+;; Phase 1: will implement jsonrpc-parse-message, jsonrpc-response, jsonrpc-error

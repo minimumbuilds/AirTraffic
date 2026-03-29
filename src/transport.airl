@@ -1,0 +1,2 @@
+;; transport.airl — stdin/stdout transport for AirTraffic MCP servers
+;; Phase 3: will implement at-read-line and at-write-response

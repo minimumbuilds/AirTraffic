@@ -1,0 +1,9 @@
+# Compiled binaries
+server
+calculator-server
+*-server
+/tests/*_test
+
+# Build artifacts
+/tmp/
+*.o

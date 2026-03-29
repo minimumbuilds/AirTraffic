@@ -1,0 +1,2 @@
+;; schema.airl — JSON Schema subset validation for MCP tool inputs
+;; Phase 1: will implement schema-validate, schema-check-type

@@ -1,0 +1,2 @@
+;; airtraffic.airl — Core MCP server framework
+;; Phase 2: will implement airtraffic-new, airtraffic-tool, airtraffic-handle, airtraffic-serve
