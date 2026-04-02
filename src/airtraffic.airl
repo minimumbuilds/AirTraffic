@@ -118,10 +118,10 @@
   :requires [(valid server)]
   :ensures [(valid result)]
   :body (let (prompts : List (map-get server "prompts"))
-    (let (summaries : List (map prompts (fn [p]
+    (let (summaries : List (map (fn [p]
       (map-from ["name" (map-get p "name")
                  "description" (map-get-or p "description" "")
-                 "arguments" (map-get-or p "arguments" [])]))))
+                 "arguments" (map-get-or p "arguments" [])])) prompts))
       (jsonrpc-response id (map-from ["prompts" summaries])))))
 
 ;; ─── airtraffic-handle-prompts-get ──────────────────────────────────
