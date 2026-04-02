@@ -1,2 +1,245 @@
 ;; airtraffic.airl — Core MCP server framework
-;; Phase 2: will implement airtraffic-new, airtraffic-tool, airtraffic-handle, airtraffic-serve
+;;
+;; Provides tool registration, role-based filtering, and MCP protocol dispatch.
+;; Server authors call airtraffic-new, airtraffic-tool, then airtraffic-serve.
+;;
+;; Note: g3 AOT does not support storing defn references in maps.
+;; Tool dispatch uses a callback function instead of a handler map.
+
+;; ─── Role -> Tool permission map ─────────────────────────────────────
+;; Each role has a list of tool names it may call.
+(defn airtraffic-role-tools
+  :sig [(role : String) -> List[String]]
+  :requires [(valid role)]
+  :ensures [(valid result)]
+  :body (if (= role "supervisor")
+    ["workflow_dispatch" "workflow_unblock" "workflow_query"
+     "workflow_check_g3_staleness" "workflow_check_stale"]
+    (if (= role "worker")
+      ["workflow_submit" "workflow_req_spec" "workflow_query"]
+      (if (= role "approver")
+        ["workflow_review" "workflow_approve" "workflow_fix_request"
+         "workflow_escalate" "workflow_approve_req_spec" "workflow_query"]
+        (if (= role "critic")
+          ["workflow_query"]
+          (if (= role "merger")
+            ["workflow_merge" "workflow_revert" "workflow_version_bump"
+             "workflow_query" "workflow_regression_check"]
+            []))))))
+
+;; ─── airtraffic-valid-role ───────────────────────────────────────────
+;; Check if a role name is valid.
+(defn airtraffic-valid-role
+  :sig [(role : String) -> Bool]
+  :requires [(valid role)]
+  :ensures [(valid result)]
+  :body (list-contains? ["supervisor" "worker" "approver" "critic" "merger"] role))
+
+;; ─── airtraffic-tool-allowed ─────────────────────────────────────────
+;; Check if a tool name is permitted for the given role.
+(defn airtraffic-tool-allowed
+  :sig [(role : String) (tool-name : String) -> Bool]
+  :requires [(valid role) (valid tool-name)]
+  :ensures [(valid result)]
+  :body (list-contains? (airtraffic-role-tools role) tool-name))
+
+;; ─── airtraffic-new ──────────────────────────────────────────────────
+;; Create a new MCP server state map.
+;; The state tracks: name, version, role, worker-id, tools (list of tool defs),
+;; and a dispatcher function for tool calls.
+(defn airtraffic-new
+  :sig [(name : String) (version : String) (role : String) (worker-id : String) -> Map]
+  :requires [(valid name) (valid version) (valid role)]
+  :ensures [(valid result)]
+  :body (map-from
+    ["name" name
+     "version" version
+     "role" role
+     "worker-id" worker-id
+     "tools" []
+     "prompts" []]))
+
+;; ─── airtraffic-tool ─────────────────────────────────────────────────
+;; Register a tool definition with the server. Returns updated server state.
+;; Only registers the tool if the server's role permits it.
+;; tool-def is a map with: "name", "description", "inputSchema"
+(defn airtraffic-tool
+  :sig [(server : Map) (tool-def : Map) -> Map]
+  :requires [(valid server) (valid tool-def)]
+  :ensures [(valid result)]
+  :body (let (tool-name : String (map-get tool-def "name"))
+    (let (role : String (map-get server "role"))
+      (if (airtraffic-tool-allowed role tool-name)
+        (let (tools : List (map-get server "tools"))
+          (map-set server "tools" (append tools tool-def)))
+        server))))
+
+;; ─── airtraffic-prompt ───────────────────────────────────────────────
+;; Register a prompt definition with the server. Returns updated server state.
+;; Unlike tools, prompts are universally available — no role filtering.
+;; prompt-def is a map with: "name", "description", "arguments", "messages"
+(defn airtraffic-prompt
+  :sig [(server : Map) (prompt-def : Map) -> Map]
+  :requires [(valid server) (valid prompt-def)]
+  :ensures [(valid result)]
+  :body (let (prompts : List (map-get server "prompts"))
+    (map-set server "prompts" (append prompts prompt-def))))
+
+;; ─── airtraffic-handle-initialize ────────────────────────────────────
+;; Handle the MCP "initialize" method.
+(defn airtraffic-handle-initialize
+  :sig [(server : Map) (id : Any) -> String]
+  :requires [(valid server)]
+  :ensures [(valid result)]
+  :body (jsonrpc-response id
+    (map-from
+      ["protocolVersion" "2024-11-05"
+       "capabilities" (map-from
+         ["tools" (map-from ["listChanged" false])
+          "prompts" (map-from ["listChanged" false])])
+       "serverInfo" (map-from
+         ["name" (map-get server "name")
+          "version" (map-get server "version")])])))
+
+;; ─── airtraffic-handle-tools-list ────────────────────────────────────
+;; Handle the MCP "tools/list" method.
+(defn airtraffic-handle-tools-list
+  :sig [(server : Map) (id : Any) -> String]
+  :requires [(valid server)]
+  :ensures [(valid result)]
+  :body (jsonrpc-response id
+    (map-from ["tools" (map-get server "tools")])))
+
+;; ─── airtraffic-handle-prompts-list ──────────────────────────────────
+;; Handle the MCP "prompts/list" method.
+;; Returns prompt metadata (name, description, arguments) without messages.
+(defn airtraffic-handle-prompts-list
+  :sig [(server : Map) (id : Any) -> String]
+  :requires [(valid server)]
+  :ensures [(valid result)]
+  :body (let (prompts : List (map-get server "prompts"))
+    (let (summaries : List (map prompts (fn [p]
+      (map-from ["name" (map-get p "name")
+                 "description" (map-get-or p "description" "")
+                 "arguments" (map-get-or p "arguments" [])]))))
+      (jsonrpc-response id (map-from ["prompts" summaries])))))
+
+;; ─── airtraffic-handle-prompts-get ──────────────────────────────────
+;; Handle the MCP "prompts/get" method.
+;; Finds a prompt by name and returns its full definition including messages.
+;; Returns JSON-RPC error if prompt name not found.
+(defn airtraffic-handle-prompts-get
+  :sig [(server : Map) (id : Any) (params : Map) -> String]
+  :requires [(valid server) (valid params)]
+  :ensures [(valid result)]
+  :body (let (name : String (map-get-or params "name" ""))
+    (let (prompts : List (map-get server "prompts"))
+      (let (found : List (filter (fn [p] (= (map-get p "name") name)) prompts))
+        (if (= (length found) 0)
+          (jsonrpc-error id -32602 (str "Prompt not found: " name))
+          (let (prompt : Map (head found))
+            (jsonrpc-response id
+              (map-from ["description" (map-get-or prompt "description" "")
+                         "messages" (map-get prompt "messages")]))))))))
+
+;; ─── airtraffic-call-tool ────────────────────────────────────────────
+;; Call a tool handler and wrap the result in MCP content format.
+;; The dispatcher is a closure that takes (tool-name, args) and returns Result.
+(defn airtraffic-call-tool
+  :sig [(id : Any) (tool-name : String) (args : Map) (dispatcher : fn) -> String]
+  :requires [(valid tool-name) (valid args) (valid dispatcher)]
+  :ensures [(valid result)]
+  :body (match (dispatcher tool-name args)
+    (Ok result-val) (jsonrpc-response id
+      (map-from
+        ["content" [(map-from ["type" "text" "text" result-val])]]))
+    (Err err-msg) (jsonrpc-response id
+      (map-from
+        ["content" [(map-from ["type" "text" "text" (str "Error: " err-msg)])]
+         "isError" true]))))
+
+;; ─── airtraffic-handle-tools-call ────────────────────────────────────
+;; Handle the MCP "tools/call" method.
+;; Validates the tool name and role permission, then delegates to the dispatcher.
+(defn airtraffic-handle-tools-call
+  :sig [(server : Map) (id : Any) (params : Map) (dispatcher : fn) -> String]
+  :requires [(valid server) (valid params) (valid dispatcher)]
+  :ensures [(valid result)]
+  :body (let (tool-name : String (map-get-or params "name" ""))
+    (let (args : Map (map-get-or params "arguments" (map-new)))
+      (let (role : String (map-get server "role"))
+        (let (schemas : Map (map-get-or server "tool-schemas" (map-new)))
+          (if (= tool-name "")
+            (jsonrpc-error-invalid-params id "missing tool name")
+            (if (not (airtraffic-tool-allowed role tool-name))
+              (jsonrpc-error id -32600
+                (str "tool '" tool-name "' is not available for role '" role "'"))
+              (airtraffic-call-tool id tool-name args dispatcher))))))))
+
+;; ─── airtraffic-dispatch ─────────────────────────────────────────────
+;; Dispatch a single parsed JSON-RPC message to the appropriate handler.
+;; Returns the response string, or nil for notifications.
+;; The dispatcher is a closure: (fn [tool-name args] -> Result)
+(defn airtraffic-dispatch
+  :sig [(server : Map) (msg : Map) (dispatcher : fn) -> Any]
+  :requires [(valid server) (valid msg) (valid dispatcher)]
+  :ensures [(valid result)]
+  :body (let (method : String (jsonrpc-get-method msg))
+    (let (id : Any (jsonrpc-get-id msg))
+      (let (params : Map (jsonrpc-get-params msg))
+        (if (= method "initialize")
+          (airtraffic-handle-initialize server id)
+          (if (= method "notifications/initialized")
+            nil
+            (if (= method "tools/list")
+              (airtraffic-handle-tools-list server id)
+              (if (= method "tools/call")
+                (airtraffic-handle-tools-call server id params dispatcher)
+                (if (= method "prompts/list")
+                  (airtraffic-handle-prompts-list server id)
+                  (if (= method "prompts/get")
+                    (airtraffic-handle-prompts-get server id params)
+                    (if (jsonrpc-is-notification msg)
+                      nil
+                      (jsonrpc-error-method-not-found id method))))))))))))
+
+;; ─── airtraffic-serve-batch ──────────────────────────────────────────
+;; Read all messages from stdin, process each, write responses to stdout.
+;; This is the batch-mode serve loop (for testing and piped input).
+;; The dispatcher is a closure: (fn [tool-name args] -> Result)
+(defn airtraffic-serve-batch
+  :sig [(server : Map) (dispatcher : fn) -> Unit]
+  :requires [(valid server) (valid dispatcher)]
+  :ensures []
+  :body (let (lines : List (at-read-all-lines))
+    (fold (fn [_ line]
+      (match (jsonrpc-parse-message line)
+        (Ok msg) (let (response : Any (airtraffic-dispatch server msg dispatcher))
+          (if (= response nil)
+            nil
+            (at-write-response response)))
+        (Err parse-err) (at-write-response
+          (jsonrpc-error nil -32700 (str "Parse error: " parse-err)))))
+      nil lines)))
+
+;; ─── airtraffic-parse-args ───────────────────────────────────────────
+;; Parse command-line arguments for --role and --worker-id.
+;; Returns a map with "role" and "worker-id" keys.
+(defn airtraffic-parse-args
+  :sig [-> Map]
+  :requires []
+  :ensures [(valid result)]
+  :body (let (args : List (get-args))
+    (let (result : Map (map-from ["role" "supervisor" "worker-id" ""]))
+      (fold (fn [state arg]
+        (let (prev-key : String (map-get-or state "_pending" ""))
+          (if (= prev-key "--role")
+            (map-set (map-remove state "_pending") "role" arg)
+            (if (= prev-key "--worker-id")
+              (map-set (map-remove state "_pending") "worker-id" arg)
+              (if (= arg "--role")
+                (map-set state "_pending" arg)
+                (if (= arg "--worker-id")
+                  (map-set state "_pending" arg)
+                  state))))))
+        result args))))

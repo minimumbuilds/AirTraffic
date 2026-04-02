@@ -1,2 +1,65 @@
 ;; schema.airl — JSON Schema subset validation for MCP tool inputs
-;; Phase 1: will implement schema-validate, schema-check-type
+;;
+;; Validates tool arguments against a schema definition.
+;; Supports: type checking, required fields, enum values.
+;; Schema format: a Map with "type", "properties", "required", "enum" keys.
+
+;; ─── schema-check-type ───────────────────────────────────────────────
+;; Check if a value matches an expected type name.
+;; Valid types: "string", "number", "integer", "boolean", "object", "array".
+(defn schema-check-type
+  :sig [(val : Any) (expected : String) -> Bool]
+  :requires [(valid expected)]
+  :ensures [(valid result)]
+  :body (let (actual : String (type-of val))
+    (if (= expected "string") (= actual "String")
+      (if (= expected "number") (if (= actual "Int") true (= actual "Float"))
+        (if (= expected "integer") (= actual "Int")
+          (if (= expected "boolean") (= actual "Bool")
+            (if (= expected "object") (= actual "Map")
+              (if (= expected "array") (= actual "List")
+                false))))))))
+
+;; ─── schema-check-enum ───────────────────────────────────────────────
+;; Check if a value is one of the allowed enum values.
+(defn schema-check-enum
+  :sig [(val : Any) (allowed : List) -> Bool]
+  :requires [(valid allowed)]
+  :ensures [(valid result)]
+  :body (list-contains? allowed val))
+
+;; ─── schema-validate ─────────────────────────────────────────────────
+;; Validate an args Map against a schema definition.
+;; Returns (Ok true) or (Err "reason").
+;;
+;; Schema format:
+;;   (map-from ["type" "object"
+;;              "properties" (map-from ["field1" (map-from ["type" "string"]) ...])
+;;              "required" ["field1" "field2"]])
+(defn schema-validate
+  :sig [(args : Map) (schema : Map) -> Result[Bool, String]]
+  :requires [(valid args) (valid schema)]
+  :ensures [(valid result)]
+  :body (let (required : List (map-get-or schema "required" []))
+    (let (props : Map (map-get-or schema "properties" (map-new)))
+      (let (missing : List (filter (fn [key] (not (map-has args key))) required))
+        (if (> (length missing) 0)
+          (Err (str "missing required fields: " (join ", " missing)))
+          (Ok true))))))
+
+;; ─── schema-validate-field ───────────────────────────────────────────
+;; Validate a single field value against its property schema.
+;; Returns (Ok true) or (Err "reason").
+(defn schema-validate-field
+  :sig [(field-name : String) (val : Any) (prop-schema : Map) -> Result[Bool, String]]
+  :requires [(valid field-name) (valid prop-schema)]
+  :ensures [(valid result)]
+  :body (if (map-has prop-schema "type")
+    (if (schema-check-type val (map-get prop-schema "type"))
+      (if (map-has prop-schema "enum")
+        (if (schema-check-enum val (map-get prop-schema "enum"))
+          (Ok true)
+          (Err (str field-name ": value not in allowed enum")))
+        (Ok true))
+      (Err (str field-name ": expected type " (map-get prop-schema "type"))))
+    (Ok true)))

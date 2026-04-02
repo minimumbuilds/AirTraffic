@@ -1,2 +1,26 @@
 ;; transport.airl — stdin/stdout transport for AirTraffic MCP servers
-;; Phase 3: will implement at-read-line and at-write-response
+;;
+;; Provides line-oriented I/O for the MCP stdio transport.
+;; Current implementation reads all stdin at once (batch mode).
+;; A proper read-line builtin is pending (REQ spec filed to repos/AIRL).
+
+;; ─── at-read-all-lines ───────────────────────────────────────────────
+;; Read all lines from stdin until EOF.
+;; Returns a list of non-empty trimmed strings.
+(defn at-read-all-lines
+  :sig [-> List[String]]
+  :requires []
+  :ensures [(valid result)]
+  :body (let (raw-lines : List (read-lines "/dev/stdin"))
+    (filter (fn [line] (!= (trim line) "")) raw-lines)))
+
+;; ─── at-write-response ───────────────────────────────────────────────
+;; Write a JSON-RPC response string to stdout.
+;; Note: flush-stdout is not available as an AOT builtin; the main()
+;; wrapper flushes at exit. For interactive use, a future read-line
+;; builtin will pair with explicit flush support.
+(defn at-write-response
+  :sig [(json-str : String) -> Unit]
+  :requires [(valid json-str)]
+  :ensures []
+  :body (do (print json-str) (print "\n")))

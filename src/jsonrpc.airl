@@ -1,2 +1,94 @@
 ;; jsonrpc.airl — JSON-RPC 2.0 message parsing and serialization
-;; Phase 1: will implement jsonrpc-parse-message, jsonrpc-response, jsonrpc-error
+;;
+;; Parses incoming JSON-RPC requests and constructs well-formed responses.
+;; Supports: request (has id + method), notification (method only, no id).
+
+;; ─── jsonrpc-parse-message ───────────────────────────────────────────
+;; Parse a raw JSON string into a JSON-RPC message map.
+;; Returns (Ok msg-map) or (Err reason).
+;; The msg-map has keys: "jsonrpc", "id", "method", "params".
+(defn jsonrpc-parse-message
+  :sig [(raw : String) -> Result[Map, String]]
+  :requires [(valid raw)]
+  :ensures [(valid result)]
+  :body (match (json-parse raw)
+    (Ok parsed) (if (map-has parsed "jsonrpc")
+      (Ok parsed)
+      (Err "missing jsonrpc field"))
+    (Err e) (Err (str "JSON parse error: " e))))
+
+;; ─── jsonrpc-is-notification ─────────────────────────────────────────
+;; Check if a parsed message is a notification (no id field).
+(defn jsonrpc-is-notification
+  :sig [(msg : Map) -> Bool]
+  :requires [(valid msg)]
+  :ensures [(valid result)]
+  :body (not (map-has msg "id")))
+
+;; ─── jsonrpc-get-method ──────────────────────────────────────────────
+;; Extract the method name from a parsed message.
+(defn jsonrpc-get-method
+  :sig [(msg : Map) -> String]
+  :requires [(valid msg)]
+  :ensures [(valid result)]
+  :body (map-get-or msg "method" ""))
+
+;; ─── jsonrpc-get-id ──────────────────────────────────────────────────
+;; Extract the id from a parsed message. Returns nil if notification.
+(defn jsonrpc-get-id
+  :sig [(msg : Map) -> Any]
+  :requires [(valid msg)]
+  :ensures [(valid result)]
+  :body (map-get-or msg "id" nil))
+
+;; ─── jsonrpc-get-params ──────────────────────────────────────────────
+;; Extract params from a parsed message. Returns empty map if absent.
+(defn jsonrpc-get-params
+  :sig [(msg : Map) -> Map]
+  :requires [(valid msg)]
+  :ensures [(valid result)]
+  :body (map-get-or msg "params" (map-new)))
+
+;; ─── jsonrpc-response ────────────────────────────────────────────────
+;; Build a JSON-RPC 2.0 success response string.
+(defn jsonrpc-response
+  :sig [(id : Any) (result-val : Any) -> String]
+  :requires [(valid id)]
+  :ensures [(valid result)]
+  :body (json-stringify (map-from ["jsonrpc" "2.0" "id" id "result" result-val])))
+
+;; ─── jsonrpc-error ───────────────────────────────────────────────────
+;; Build a JSON-RPC 2.0 error response string.
+;; code: standard JSON-RPC error code (e.g., -32600, -32601, -32602).
+(defn jsonrpc-error
+  :sig [(id : Any) (code : Int) (message : String) -> String]
+  :requires [(valid id)]
+  :ensures [(valid result)]
+  :body (json-stringify (map-from
+    ["jsonrpc" "2.0"
+     "id" id
+     "error" (map-from ["code" code "message" message])])))
+
+;; ─── jsonrpc-error-method-not-found ──────────────────────────────────
+;; Convenience: method not found error (-32601).
+(defn jsonrpc-error-method-not-found
+  :sig [(id : Any) (method : String) -> String]
+  :requires [(valid id)]
+  :ensures [(valid result)]
+  :body (jsonrpc-error id -32601 (str "Method not found: " method)))
+
+;; ─── jsonrpc-error-invalid-params ────────────────────────────────────
+;; Convenience: invalid params error (-32602).
+(defn jsonrpc-error-invalid-params
+  :sig [(id : Any) (detail : String) -> String]
+  :requires [(valid id)]
+  :ensures [(valid result)]
+  :body (jsonrpc-error id -32602 (str "Invalid params: " detail)))
+
+;; ─── jsonrpc-error-internal ──────────────────────────────────────────
+;; Convenience: internal error (-32603).
+(defn jsonrpc-error-internal
+  :sig [(id : Any) (detail : String) -> String]
+  :requires [(valid id)]
+  :ensures [(valid result)]
+  :body (jsonrpc-error id -32603 (str "Internal error: " detail)))
